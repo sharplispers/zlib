@@ -1,7 +1,7 @@
 ;;; ZLIB
 ;;;
 ;;; Copyright (C) 2001-2004  Harald Musum (musum@pvv.org)
-;;; Copyright (C) 2004  Matthieu Villeneuve (matthieu.villeneuve@free.fr)
+;;; Copyright (C) 2004-2006  Matthieu Villeneuve (matthieu.villeneuve@free.fr)
 ;;;
 ;;; The authors grant you the rights to distribute
 ;;; and use this software as governed by the terms
@@ -314,64 +314,127 @@
 	do (setf (aref result i) (ldb (byte 1 i) code))
 	finally (return result)))
 
-;; FIXME. It should be possible to do this smarter
+
+;;; DECISION-TREE macro
+;;; Thanks to Pascal Bourguignon
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+
+  (defun infix-to-tree (sequence)
+    (labels ((itt (items start end)
+               (cond
+                 ((= start end)       nil)
+                 ((= (1+ start) end)  (list (aref items start)))
+                 (t (let ((pivot (truncate (/ (+ start end) 2))))
+                      (list (aref items pivot)
+                            (itt items start pivot)
+                            (itt items (1+ pivot) end)))))))
+      (let ((vect (coerce sequence 'vector)))
+        (itt vect 0 (length vect)))))
+    
+  (defun map-tree-postfix (fun tree)
+    (if (null tree)
+        nil
+        (funcall fun
+                 (first tree)
+                 (map-tree-postfix fun (second tree))
+                 (map-tree-postfix fun (third  tree))))))
+
+(defmacro decision-tree (expression &rest clauses)
+  "
+CLAUSES:  Each clause is of the forms:
+          (less|:less . <body>) ; must be the first clause if present.
+          (<real> . <body>)
+DO:       Evaluate the expression, which must be a real,
+          and generate a binary decision tree to select the <body>
+          of the clause whose limit is <= the expression and
+          the next clause limit is > the expression.
+"
+  (let ((vexpr (gensym))
+        (less (when (and (symbolp (first (first clauses)))
+                         (string-equal 'less (first (first clauses))))
+                (pop clauses)))
+        (clauses (sort (coerce clauses 'vector) (function <)
+                       :key (function car))))
+    `(let ((,vexpr ,expression))
+       ,(map-tree-postfix
+         (let ((index -1))
+           (flet ((gen-case ()
+                    (incf index)
+                    (if (zerop index)
+                       `(progn ,@(cdr less))
+                       `(progn ,@(cdr (aref clauses (1- index)))))))
+             (lambda (node left right)
+               (if (and (null left) (null right))
+                   `(if (< ,vexpr ,(car node))
+                        ,(gen-case)
+                        ,(gen-case))
+                   `(if (< ,vexpr ,(car node))
+                        ,left
+                        ,(if (null right)
+                             (gen-case)
+                             right))))))
+         (infix-to-tree clauses)))))
+
 (defun distance-code (distance)
   "Return the distance-code for a given DISTANCE"
-  (cond ((< distance 5) (1- distance))
-	((<= 5 distance 6) 4)
-	((<= 7 distance 8) 5)
-	((<= 9 distance 12) 6)
-	((<= 13 distance 16) 7)
-	((<= 17 distance 24) 8)
-	((<= 25 distance 32) 9)
-	((<= 33 distance 48) 10)
-	((<= 49 distance 64) 11)
-	((<= 65 distance 96) 12)
-	((<= 97 distance 128) 13)
-	((<= 129 distance 192) 14)
-	((<= 193 distance 256) 15)
-	((<= 257 distance 384) 16)
-	((<= 385 distance 512) 17)
-	((<= 513 distance 768) 18)
-	((<= 769 distance 1024) 19)
-	((<= 1025 distance 1536) 20)
-	((<= 1537 distance 2048) 21)
-	((<= 2049 distance 3072) 22)
-	((<= 3073 distance 4096) 23)
-	((<= 4097 distance 6144) 24)
-	((<= 6145 distance 8192) 25)
-	((<= 8193 distance 12288) 26)
-	((<= 12289 distance 16384) 27)
-	((<= 16385 distance 24576) 28)
-	((<= 24577 distance 32768) 29)
-	(t (error "A distance larger than 32768 is illegal"))))
+  (decision-tree distance
+                 (less (1- distance))
+                 (5 4)
+                 (7 5)
+                 (9 6)
+                 (13 7)
+                 (17 8)
+                 (25 9)
+                 (33 10)
+                 (49 11)
+                 (65 12)
+                 (97 13)
+                 (129 14)
+                 (193 15)
+                 (257 16)
+                 (385 17)
+                 (513 18)
+                 (769 19)
+                 (1025 20)
+                 (1537 21)
+                 (2049 22)
+                 (3073 23)
+                 (4097 24)
+                 (6145 25)
+                 (8193 26)
+                 (12289 27)
+                 (16385 28)
+                 (24577 29)
+                 (32769 (error "A distance larger than 32768 is illegal"))))
 
-;; FIXME. It should be possible to do this smarter
+
 (defun length-code (length)
   "Return the length-code for a given LENGTH"
-  (cond ((<= length 10) (+ 254 length))
-	((<= 11 length 12) 265)
-	((<= 13 length 14) 266)
-	((<= 15 length 16) 267)
-	((<= 17 length 18) 268)
-	((<= 19 length 22) 269)
-	((<= 23 length 26) 270)
-	((<= 27 length 30) 271)
-	((<= 31 length 34) 272)
-	((<= 35 length 42) 273)
-	((<= 43 length 50) 274)
-	((<= 51 length 58) 275)
-	((<= 59 length 66) 276)
-	((<= 67 length 82) 277)
-	((<= 83 length 98) 278)
-	((<= 99 length 114) 279)
-	((<= 115 length 130) 280)
-	((<= 131 length 162) 281)
-	((<= 163 length 194) 282)
-	((<= 195 length 226) 283)
-	((<= 227 length 257) 284)
-	((= length 258) 285)
-	(t (error "A length larger than 258 is illegal"))))
+  (decision-tree length
+                 (less (+ 254 length))
+                 (11 265)
+                 (13 266)
+                 (15 267)
+                 (17 268)
+                 (19 269)
+                 (23 270)
+                 (27 271)
+                 (31 272)
+                 (35 273)
+                 (43 274)
+                 (51 275)
+                 (59 276)
+                 (67 277)
+                 (83 278)
+                 (99 279)
+                 (115 280)
+                 (131 281)
+                 (163 282)
+                 (195 283)
+                 (227 284)
+                 (258 285)
+                 (259 (error "A length larger than 258 is illegal"))))
 
 (defun distance-code-bits (code)
   "Return a list with 5 elements that are the binary representation of CODE."
