@@ -767,7 +767,7 @@ push INDEX into HASH-TABLE"
   (let ((values (gethash hash-value hash-table)))
     (if (>= (length values) +deflate-max-hash-table-contents-length+)
 	(progn
-	  (setq valuef (subseq values
+	  (setq values (subseq values
                                0
                                (1- +deflate-max-hash-table-contents-length+)))
 	  (push index values)
