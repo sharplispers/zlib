@@ -800,8 +800,8 @@ push INDEX into HASH-TABLE"
 	with values = (make-array 3 :element-type '(unsigned-byte 8))
 	with symbol 
 	with bit-list
-;	with position
-;       with length
+        with position
+        with length
         with distance
 	with length-code
 	with distance-code
