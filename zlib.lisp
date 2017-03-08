@@ -32,7 +32,7 @@
      (2 (format *debug-stream* ,@body))))
 
 (defconstant +zlib-major-version+ 0)
-(defconstant +zlib-minor-version+ 1)
+(defconstant +zlib-minor-version+ 2)
 
 (defvar +fixed-huffman-code-lengths+
   (let ((array (make-array 288)))
@@ -473,11 +473,13 @@ LENGTH elements"
 	do (setf (aref bit-vector i) (ldb (byte 1 i) value))
 	finally (return bit-vector)))
 
-(defun read-32-bits-from-array (array)
-  "Read a 32-bit word from ARRAY, MSB first"
+(defun read-32-bits-from-array (array &optional (start 0))
+  "Read a 32-bit word from ARRAY, MSB first starting from position START"
+  (declare (type (array (unsigned-byte 8)) array)
+           (type integer start))
   (loop with length = 0
         for i from 0 below 4
-        do (incf length (ash (aref array i) (* 8 (- 3 i))))
+        do (incf length (ash (aref array (+ start i)) (* 8 (- 3 i))))
         finally (return length)))
 
 ;;; Checksum functions
@@ -498,43 +500,55 @@ LENGTH elements"
 appendix C of RFC 1950. update-adler-32 does all the work"
   (update-adler-32 1 buffer))
 
-(defun uncompress (buffer &key (uncompressed-size nil))
+(defun uncompress (buffer &key
+                          (uncompressed-size nil)
+                          (output-buffer nil)
+                          (start 0)
+                          (end (length buffer)))
   "Uncompresses BUFFER. Returns a vector of bytes containing the uncompressed
-data, and the length of the uncompressed data."
+data, and the length of the uncompressed data.
+UNCOMPRESSED-SIZE is a hint to set the result buffer size.
+If UNCOMPRESSED-SIZE is not specified it is set as double of comressed BUFFER
+size.
+If OUTPUT-BUFFER is specified, the result will be written to this buffer,
+and the UNCOMPRESSED-SIZE is ignored.
+Otherwise (default) a new array will be created of size UNCOMPRESSED-SIZE
+START specifies the start position in the BUFFER (0 by default)
+END specifies the end position in the BUFFER (length of BUFFER by default)"
   (declare (type (vector (unsigned-byte 8)) buffer)
            (optimize speed))
-  (when (null uncompressed-size)
-    (setf uncompressed-size (* 2 (length buffer))))
-  (loop with bit-stream = (make-bit-stream :bytes buffer :position 0)
+  (unless output-buffer
+    (setf output-buffer (make-array
+                         (if (null uncompressed-size) (* 2 (length buffer))
+                             uncompressed-size)
+                         :adjustable t
+                         :fill-pointer 0
+                         :element-type '(unsigned-byte 8))))
+  (loop with bit-stream = (make-bit-stream :bytes buffer :position start)
 	with cmf fixnum = (bit-stream-read-byte bit-stream)
 	with flg fixnum = (bit-stream-read-byte bit-stream)
 	for bfinal fixnum = (bit-stream-read-bits bit-stream 1)
 	for btype fixnum = (bit-stream-read-bits bit-stream 2)
-	with adler-32 = (read-32-bits-from-array
-                         (subseq buffer (- (length buffer) 4)))
-	with result = (make-array uncompressed-size
-				  :adjustable t
-				  :fill-pointer 0
-				  :element-type '(unsigned-byte 8))
+	with adler-32 = (read-32-bits-from-array buffer (- end 4))
 	do (check-type (ldb (byte 4 0) cmf) (integer 8))
 	   (check-type (ldb (byte 1 5) flg) (integer 0))
            (assert (zerop (mod (+ (* 256 cmf) flg) 31)))
            (cond
              ((= btype 0)
               (debug-format-1 "~&Data in non-compressed format.~%")
-              (decode-non-compressed-block bit-stream result))
+              (decode-non-compressed-block bit-stream output-buffer))
              ((= btype 1)
               (debug-format-1 "~&Compressed with fixed Huffman codes.~%")
-              (decode-fixed-huffman-block bit-stream result))
+              (decode-fixed-huffman-block bit-stream output-buffer))
              ((= btype 2)
               (debug-format-1 "~&Compressed with dynamic Huffman codes.~%")
-              (decode-dynamic-huffman-block bit-stream result))
+              (decode-dynamic-huffman-block bit-stream output-buffer))
              (t (error "Data compression method not recognized.")))
            (debug-format-2 "~&End of block found. Deflate block processed.~%")
            (when (= bfinal 1)
-             (unless (= (adler-32 result) adler-32)
+             (unless (= (adler-32 output-buffer) adler-32)
                (error "Adler-32 checksum error"))
-             (return (values result (fill-pointer result))))))
+             (return (values output-buffer (fill-pointer output-buffer))))))
 
 (defun decode-non-compressed-block (bit-stream result)
   "Decode one non-compressed block in BIT-STREAM and store the result
@@ -581,17 +595,18 @@ result in RESULT."
 (defun decode-dynamic-huffman-block (bit-stream result)
   "Decode one block in BIT-STREAM with dynamic Huffman coding and
 store the result in RESULT"
-  (declare (optimize speed))
+  (declare (optimize (speed 3) (debug 0) (safety 1)))
   (let ((hlit (+ (bit-stream-read-bits bit-stream 5) 257))
 	(hdist (+ (bit-stream-read-bits bit-stream 5) 1))
 	(hclen (+ (bit-stream-read-bits bit-stream 4) 4))
-        (code-lengths (make-array 19 :initial-element 0))
+        (code-lengths (make-array 19 :initial-element 0 :element-type 'fixnum))
 	literal-huffman-tree
         distance-huffman-tree
 	code-length-huffman-tree)
+    (declare (type fixnum hlit hdist hclen))
     (loop for i fixnum from 1 to hclen
-	  for j in +dynamic-huffman-code-lengths-order+
-	  do (setf (aref code-lengths j) (bit-stream-read-bits bit-stream 3)))
+	  for j fixnum in +dynamic-huffman-code-lengths-order+
+	  do (setf (aref code-lengths j) (the fixnum (bit-stream-read-bits bit-stream 3))))
     (setq code-length-huffman-tree (make-huffman-tree code-lengths))
     (setq literal-huffman-tree (make-huffman-tree
 				(read-huffman-code-lengths
@@ -603,8 +618,8 @@ store the result in RESULT"
 				  bit-stream
 				  code-length-huffman-tree
 				  hdist)))
-    (loop for symbol fixnum = (bit-stream-read-symbol bit-stream literal-huffman-tree)
-	  with i fixnum = (fill-pointer result)
+    (loop with i fixnum = (fill-pointer result)
+          for symbol fixnum = (the fixnum (bit-stream-read-symbol bit-stream literal-huffman-tree))
 	  until (= symbol +huffman-end-of-block-symbol+)
 	  do (if (<= symbol 255)
                  (progn
@@ -616,14 +631,15 @@ store the result in RESULT"
                       symbol
                       distance-huffman-tree)
                    (declare (type fixnum length distance))
-                   (loop for j fixnum from 0 below length
-                         with source-index fixnum = (- i distance)
+                   (loop with source-index fixnum = (- i distance)
+                         for j fixnum from 0 below length
                          do (vector-push-extend
-                             (logand (aref result
-                                           (+ (mod j distance)
-                                              source-index))
-                                     #xff)
-                             result)
+                             (the (unsigned-byte 8)
+                                  (logand (aref result
+                                                (+ (mod j distance)
+                                                   source-index))
+                                          #xff))
+                                  result)
                             (incf i)))))))
 
 (defun compress (buffer btype)
